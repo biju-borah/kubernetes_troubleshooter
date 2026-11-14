@@ -11,7 +11,7 @@ An AI-assisted tool that diagnoses unhealthy Kubernetes pods by analyzing their 
 | Mode A — On-demand CLI | Implemented | Interactive namespace input; finds unhealthy pods, diagnoses them, and prints results |
 | Mode B — Continuous Watch | Implemented with known issues | `watch-service` publishes unhealthy pod snapshots to Kafka; `worker-service` consumes them, diagnoses failures, and persists results |
 
-Both pipelines are present in source. See [Known Limitations](#known-limitations) for issues affecting diagnosis categories, watcher configuration, and caching.
+Both pipelines are present in source. See [Known Limitations](#known-limitations) for remaining gaps in container coverage, update-driven detection, and caching.
 
 ---
 
@@ -148,13 +148,11 @@ Please enter the namespace: troubleshoot-test
 
 The CLI prints `PodName`, `Failure_Category`, `Root Cause`, and `Suggested Fix` for diagnosed pods, then prompts again. Enter another namespace to scan again, or `exit` to leave the input loop. Use Ctrl+C to stop the process if it remains running. The runner does not read a `--namespace` command-line argument.
 
-New diagnoses are persisted to PostgreSQL and cached in Redis. A subsequent scan with the same cache key returns the cached result without another LLM call or database insert. The current response-field mismatch can leave the printed category as `null`; see [Known Limitations](#known-limitations).
+New diagnoses are persisted to PostgreSQL and cached in Redis. A subsequent scan with the same cache key returns the cached result without another LLM call or database insert. Both diagnosis services map the LLM's JSON `category` field to the Java `failureCategory` field; the legacy JSON field `failureCategory` is also accepted.
 
 ---
 
 ## Running Mode B (Continuous Watch)
-
-**Current issue:** `SnapshotBuilder` has a malformed namespace placeholder, `@Value("${kubernetes.namespace:default")`, missing the closing `}`. It is used for event/log lookups and the emitted snapshot's namespace. This needs correction to `@Value("${kubernetes.namespace:default}")` before relying on Mode B's evidence collection. The commands below describe the configured startup flow; they do not fix this source issue.
 
 Start the worker in a terminal with `LLM_API_KEY` set:
 
@@ -169,7 +167,7 @@ mvn -pl watch-service org.springframework.boot:spring-boot-maven-plugin:3.5.16:r
   -Dspring-boot.run.arguments="--kubernetes.namespace=troubleshoot-test"
 ```
 
-Replace `troubleshoot-test` with your namespace. The checked-in watcher configuration also defaults to `troubleshoot-test`; the property name is `kubernetes.namespace`.
+Replace `troubleshoot-test` with your namespace. The checked-in watcher configuration also defaults to `troubleshoot-test`; the property name is `kubernetes.namespace`. The informer, producer, and snapshot builder use this property, including event/log lookups and the emitted snapshot's namespace. If the property is absent from all configuration sources, the injection fallback is `default`.
 
 The watcher starts a `SharedIndexInformer` for that namespace. On each pod update, it checks the new pod's health and publishes a full `PodSnapshot` to `pod-snapshot` if unhealthy. It does not compare old and new health, so repeated unhealthy updates can produce multiple messages. Add/delete callbacks only print metadata; existing unhealthy pods are not diagnosed during the initial add callback.
 
@@ -184,9 +182,29 @@ docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
 
 ---
 
-## Manual Testing
+## Testing
 
-There are currently no automated test sources in the repository. The following pods provide a manual integration exercise and require a running cluster and the infrastructure above. For Mode B, address the watcher issue above and start the services before creating the test pods so updates can be observed.
+### Automated regression tests
+
+Run from the repository root with Java 17+ and Maven installed:
+
+```bash
+mvn test
+```
+
+The parent POM pins Maven Surefire 3.5.4 so the JUnit 5 tests run consistently. The tests use mocked HTTP and Kubernetes clients; they do not require a cluster, Groq API key, Kafka, Redis, or PostgreSQL.
+
+Coverage includes:
+
+- Both LLM clients decoding every supported failure category from the prompt's `category` field, accepting the legacy `failureCategory` field, and rejecting unsupported category values.
+- HTTP request construction using each service's actual prompt builder and LLM client.
+- Snapshot builder property resolution for an explicitly configured namespace and the `default` fallback, including the namespace passed to event/log lookups and captured in the snapshot.
+
+These focused tests do not validate live service integrations; use the manual exercise below for those.
+
+### Manual integration exercise
+
+The following pods require a running cluster and the infrastructure above. For Mode B, start the services before creating the test pods so updates can be observed.
 
 Create unhealthy test pods:
 
@@ -219,7 +237,7 @@ Check the pod states until the failures are visible:
 kubectl get pods -n troubleshoot-test
 ```
 
-Run the Mode A command above and enter `troubleshoot-test` at the prompt. For Mode B, inspect the worker's console output and the `diagnosis` table. Diagnosis text varies with the LLM response; failure-category handling currently has the limitation described below.
+Run the Mode A command above and enter `troubleshoot-test` at the prompt. For Mode B, inspect the worker's console output and the `diagnosis` table. Diagnosis text varies with the LLM response.
 
 ---
 
@@ -249,8 +267,6 @@ Kubernetes event/log API errors are caught so evidence collection can continue w
 
 ## Known Limitations
 
-- **Watcher namespace placeholder** — `SnapshotBuilder` is missing `}` in its `@Value` expression, as described in the Mode B startup section.
-- **LLM category mismatch** — both prompts ask for JSON field `category`, but both `LLMResponse` records expect `failureCategory`. Responses following the prompt leave that field null; persistence substitutes `Unknown`.
 - **Init and multiple containers** — health checks examine regular container statuses, but snapshot waiting reason/restart count come only from the first regular container. Init container statuses are not inspected. Log requests do not explicitly select a container, so multi-container log coverage is incomplete.
 - **Namespace scope** — each CLI scan targets one namespace; the interactive session can scan another afterward. Each watcher instance monitors one configured namespace.
 - **Update-driven detection** — initial add callbacks do not publish snapshots. Pending-age checks run when health is evaluated on an update, rather than on a separate timer.
@@ -263,8 +279,9 @@ Kubernetes event/log API errors are caught so evidence collection can continue w
 ## Roadmap
 
 - [x] `worker-service` — Kafka consumer with LLM diagnosis, PostgreSQL persistence, and Redis caching
-- [ ] Correct watcher namespace injection and align the LLM JSON response fields
-- [ ] Add automated tests for health checks, diagnosis, caching, and the Kafka pipeline
+- [x] Correct watcher namespace injection and align the LLM JSON response fields
+- [x] Add regression tests for namespace resolution and LLM category parsing in both diagnosis services
+- [ ] Extend automated coverage to health checks, diagnosis orchestration, caching, and the Kafka pipeline
 - [ ] Share diagnosis components and make cache serialization compatible across services
 - [ ] Add cache expiry and improve failure deduplication
 - [ ] Init container failure detection

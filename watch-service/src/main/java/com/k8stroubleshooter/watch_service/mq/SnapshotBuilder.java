@@ -19,7 +19,7 @@ public class SnapshotBuilder {
     private final PodHealthChecker podHealthChecker;
     private final K8sClient k8sClient;
 
-    @Value("${kubernetes.namespace:default")
+    @Value("${kubernetes.namespace:default}")
     private String namespace;
 
     public PodSnapshot buildSnapshot(V1Pod pod) {

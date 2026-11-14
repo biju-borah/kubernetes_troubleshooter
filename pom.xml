@@ -44,4 +44,15 @@
         </dependencies>
     </dependencyManagement>
 
+    <build>
+        <plugins>
+            <!-- The Boot BOM does not manage plugins; explicitly enable JUnit 5 tests. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.4</version>
+            </plugin>
+        </plugins>
+    </build>
+
 </project>
